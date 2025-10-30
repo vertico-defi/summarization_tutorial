@@ -1,8 +1,6 @@
-import pyarrow.parquet as pq
-import pyarrow.compute as pc
-import pyarrow.dataset as ds
+import pandas as pd
 import pyarrow as pa
-import os
+import pyarrow.parquet as pq
 import re
 
 # ============================================================
@@ -11,10 +9,11 @@ import re
 
 INPUT_FILE = "bilingual_books.parquet"
 OUTPUT_FILE = "bilingual_books_filtered_titles.parquet"
-MIN_TITLE_WORDS = 3  # must have more than 2 words
+MIN_TITLE_WORDS = 3
+MIN_BODY_WORDS = 10
 
 # ============================================================
-# Helper to count words
+# Helper
 # ============================================================
 
 def count_words(text):
@@ -23,43 +22,41 @@ def count_words(text):
     return len(re.findall(r"\w+", text))
 
 # ============================================================
-# Load and filter
+# Load + Filter
 # ============================================================
 
 print(f"📦 Loading dataset from {INPUT_FILE}...")
-dataset = ds.dataset(INPUT_FILE, format="parquet")
+df = pd.read_parquet(INPUT_FILE)
 
-# Read only necessary columns to count words efficiently
-table = dataset.to_table(columns=["review_title", "review_body", "stars", "language", "product_category"])
+print(f"Before filtering: {len(df):,} rows")
 
-# Compute word counts for titles
-title_word_counts = [count_words(title) for title in table["review_title"]]
+# Compute word counts
+df["title_words"] = df["review_title"].apply(count_words)
+df["body_words"] = df["review_body"].apply(count_words)
 
-# Create a boolean mask for rows with > MIN_TITLE_WORDS
-mask = pa.array([wc >= MIN_TITLE_WORDS for wc in title_word_counts])
+# Filter rows
+filtered_df = df[(df["title_words"] >= MIN_TITLE_WORDS) & (df["body_words"] >= MIN_BODY_WORDS)]
 
-# Filter the table
-filtered_table = table.filter(mask)
-print(f"✅ Filtered dataset: {filtered_table.num_rows:,} rows remaining (titles with ≥ {MIN_TITLE_WORDS} words).")
+print(f"✅ After filtering: {len(filtered_df):,} rows remain "
+      f"(titles ≥ {MIN_TITLE_WORDS} words & bodies ≥ {MIN_BODY_WORDS} words)")
 
-# Save the filtered version
-pq.write_table(filtered_table, OUTPUT_FILE)
+# Save as parquet
+table = pa.Table.from_pandas(filtered_df)
+pq.write_table(table, OUTPUT_FILE)
 print(f"💾 Saved filtered dataset → {OUTPUT_FILE}")
 
 # ============================================================
-# Verify by sampling
+# Show random samples
 # ============================================================
 
-print("\n🔍 Checking a few random samples after filtering:")
-df = filtered_table.to_pandas()
-sample_df = df.sample(n=min(5, len(df)), random_state=42)
-
+sample_df = filtered_df.sample(n=min(5, len(filtered_df)), random_state=42)
 for i, row in sample_df.iterrows():
     print(f"\n🔹 Sample {i}")
-    print(f"Language: {row.get('language', 'N/A')}")
-    print(f"Title: {row.get('review_title', '')}")
-    print(f"Word count: {count_words(row.get('review_title', ''))}")
-    print(f"Review: {row.get('review_body', '')[:200]}")
+    print(f"Language: {row['language']}")
+    print(f"Title: {row['review_title']}")
+    print(f"Title words: {row['title_words']}")
+    print(f"Body words: {row['body_words']}")
+    print(f"Review: {row['review_body'][:200]}")
     print("-" * 60)
 
-print("\n🎉 Done! Titles filtered successfully.")
+print("\n🎉 Done! Filter applied successfully.")
