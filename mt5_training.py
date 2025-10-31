@@ -3,6 +3,7 @@ import pandas as pd
 import threading
 import itertools
 import sys
+from pathlib import Path
 from datasets import Dataset
 from transformers import (
     AutoTokenizer,
@@ -29,7 +30,7 @@ EPOCHS = 2
 OUTPUT_DIR = "./mt5_summarization_results"
 
 # ============================================================
-# VERSION CHECK (useful debug info)
+# VERSION CHECK (for debugging)
 # ============================================================
 
 import transformers, datasets, tokenizers
@@ -165,24 +166,48 @@ tokenized_train, tokenized_val = timed_stage("Tokenization", tokenize_dataset)
 data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
 # ============================================================
-# LOAD ROUGE METRIC
+# LOAD ROUGE METRIC + NLTK FIX
 # ============================================================
 
 rouge = evaluate.load("rouge")
 nltk.download("punkt", quiet=True)
+nltk.download("punkt_tab", quiet=True)
+
+# ============================================================
+# COMPUTE METRICS (safe decoding)
+# ============================================================
 
 def compute_metrics(eval_pred):
     predictions, labels = eval_pred
-    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+
+    # Ensure predictions and labels are valid token IDs
+    predictions = np.clip(predictions, 0, tokenizer.vocab_size - 1)
     labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+
+    # Decode the token IDs back into text
+    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
+    # Split into sentences for better ROUGE calculation
     decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
     decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
 
+    # Compute ROUGE scores using the Evaluate library
     result = rouge.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-    result = {k: v.mid.fmeasure * 100 for k, v in result.items()}
-    return {k: round(v, 4) for k, v in result.items()}
+
+    # 🔧 Extract precision, recall, and fmeasure for each ROUGE type
+    processed_result = {}
+    for k, v in result.items():
+        if hasattr(v, "mid"):
+            processed_result[f"{k}_precision"] = v.mid.precision * 100
+            processed_result[f"{k}_recall"] = v.mid.recall * 100
+            processed_result[f"{k}_fmeasure"] = v.mid.fmeasure * 100
+        else:
+            # Handle potential float values if returned directly
+            processed_result[f"{k}_fmeasure"] = float(v) * 100
+
+    return {k: round(v, 4) for k, v in processed_result.items()}
+
 
 # ============================================================
 # TRAINING ARGUMENTS (Seq2Seq)
@@ -191,7 +216,8 @@ def compute_metrics(eval_pred):
 args = Seq2SeqTrainingArguments(
     output_dir=OUTPUT_DIR,
     eval_strategy="epoch",
-    save_strategy="epoch",
+    save_strategy="steps",
+    save_steps=500,  # save every 500 steps
     learning_rate=2e-5,
     per_device_train_batch_size=BATCH_SIZE,
     per_device_eval_batch_size=BATCH_SIZE,
@@ -220,10 +246,29 @@ trainer = Seq2SeqTrainer(
 )
 
 # ============================================================
-# TRAIN
+# TRAIN (with resume support)
 # ============================================================
 
-timed_stage("Fine-tuning mT5 model", trainer.train)
+def train_with_resume():
+    checkpoints = sorted(Path(OUTPUT_DIR).glob("checkpoint-*"), key=lambda x: int(x.name.split("-")[-1]))
+    if checkpoints:
+        last_checkpoint = str(checkpoints[-1])
+        print(f"🔁 Resuming training from {last_checkpoint}")
+        trainer.train(resume_from_checkpoint=last_checkpoint)
+    else:
+        print("🚀 Starting fresh training ...")
+        trainer.train()
+
+timed_stage("Fine-tuning mT5 model", train_with_resume)
+
+# ============================================================
+# SAVE FINAL MODEL
+# ============================================================
+
+print("💾 Saving final fine-tuned model and tokenizer...")
+trainer.save_model(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
+print(f"✅ Model saved to {OUTPUT_DIR}")
 
 # ============================================================
 # EVALUATE ON TEST SET
