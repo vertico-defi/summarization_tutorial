@@ -82,6 +82,28 @@ def load_data():
 train_dataset, val_dataset, test_dataset, test_df = timed_stage("Loading and preparing data", load_data)
 
 # ============================================================
+# LEAD-3 BASELINE (for comparison)
+# ============================================================
+
+from nltk.tokenize import sent_tokenize
+
+def three_sentence_summary(text):
+    """Take the first three sentences of a review."""
+    return "\n".join(sent_tokenize(text)[:3])
+
+def evaluate_baseline(dataset, metric):
+    """Compute ROUGE for the simple lead-3 baseline."""
+    summaries = [three_sentence_summary(text) for text in dataset["review_body"]]
+    references = dataset["review_title"]
+    result = metric.compute(predictions=summaries, references=references, use_stemmer=True)
+    return {k: round(v.mid.fmeasure * 100, 2) if hasattr(v, "mid") else round(float(v) * 100, 2)
+            for k, v in result.items()}
+
+print("\n⏳ Evaluating simple Lead-3 baseline ...")
+baseline_scores = evaluate_baseline(val_dataset, rouge)
+print("📊 Lead-3 baseline ROUGE scores:", baseline_scores)
+
+# ============================================================
 # LOAD TOKENIZER AND MODEL (with spinner)
 # ============================================================
 
